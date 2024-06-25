@@ -29,6 +29,7 @@ export type Application = {
           externalId: string;
           title: string;
           icon: string | null;
+          emailIcon: string | null;
         };
       };
     };
@@ -54,7 +55,17 @@ export type Application = {
   };
   database: Database;
   server: undefined | ReturnType<typeof server>;
-  layout: (body: HTML) => HTML;
+  layout: ({
+    request,
+    response,
+    head,
+    body,
+  }: {
+    request: serverTypes.Request<{}, {}, {}, {}, {}>;
+    response: serverTypes.Response;
+    head: HTML;
+    body: HTML;
+  }) => HTML;
   partials: {
     feed: ({
       feed,
@@ -64,6 +75,7 @@ export type Application = {
         externalId: string;
         title: string;
         icon: string | null;
+        emailIcon: string | null;
       };
       feedEntries: {
         id: number;
@@ -78,7 +90,7 @@ export type Application = {
   email: undefined | SMTPServer;
 };
 const application = {} as Application;
-application.version = "2.0.6";
+application.version = "2.0.7";
 application.commandLineArguments = util.parseArgs({
   options: {
     type: { type: "string" },
@@ -266,6 +278,11 @@ application.database = await new Database(
     alter table "feeds" add column "icon" text null;
     alter table "feedEntries" add column "author" text null;
   `,
+
+  sql`
+    alter table "feeds" rename column "icon" to "emailIcon";
+    alter table "feeds" add column "icon" text null;
+  `,
 );
 
 if (application.commandLineArguments.values.type === "backgroundJob")
@@ -308,7 +325,7 @@ if (application.commandLineArguments.values.type === "backgroundJob")
     );
   });
 
-application.layout = (body) => {
+application.layout = ({ request, response, head, body }) => {
   css`
     @import "@radically-straightforward/javascript/static/index.css";
     @import "@fontsource-variable/public-sans";
@@ -363,6 +380,11 @@ application.layout = (body) => {
       font-weight: 700;
     }
 
+    hr {
+      border-top: var(--border-width--1) solid
+        light-dark(var(--color--slate--200), var(--color--slate--800));
+    }
+
     small {
       font-size: var(--font-size--3);
       line-height: var(--font-size--3--line-height);
@@ -408,11 +430,6 @@ application.layout = (body) => {
       `}"
     >
       <head>
-        <title>Kill the Newsletter!</title>
-        <meta
-          name="description"
-          content="Convert email newsletters into Atom feeds"
-        />
         <meta name="version" content="${application.version}" />
         <link rel="stylesheet" href="/${caddy.staticFiles["index.css"]}" />
         <script src="/${caddy.staticFiles["index.mjs"]}"></script>
@@ -420,6 +437,11 @@ application.layout = (body) => {
           name="viewport"
           content="width=device-width, initial-scale=1, maximum-scale=1"
         />
+        <meta
+          name="description"
+          content="Convert email newsletters into Atom feeds"
+        />
+        $${head}
       </head>
       <body
         css="${css`
@@ -435,6 +457,7 @@ application.layout = (body) => {
         `}"
       >
         <div
+          key="${request.URL.pathname}"
           css="${css`
             max-width: var(--space--144);
             margin: var(--space--0) auto;
@@ -481,6 +504,48 @@ application.layout = (body) => {
           </div>
           $${body}
         </div>
+        $${(() => {
+          const flash = request.getFlash();
+          return typeof flash === "string"
+            ? html`
+                <div
+                  key="flash"
+                  css="${css`
+                    text-align: center;
+                    color: light-dark(
+                      var(--color--green--800),
+                      var(--color--green--200)
+                    );
+                    background-color: light-dark(
+                      var(--color--green--50),
+                      var(--color--green--950)
+                    );
+                    max-width: var(--space--96);
+                    padding: var(--space--1) var(--space--2);
+                    border: var(--border-width--1) solid
+                      light-dark(
+                        var(--color--green--400),
+                        var(--color--green--600)
+                      );
+                    border-radius: var(--border-radius--1);
+                    box-shadow: var(--box-shadow--4);
+                    margin: var(--space--0) auto;
+                    position: fixed;
+                    top: var(--space--8);
+                    left: var(--space--2);
+                    right: var(--space--2);
+                  `}"
+                  javascript="${javascript`
+                    setTimeout(() => {
+                      this.remove();
+                    }, 3 * 1000);
+                  `}"
+                >
+                  $${flash}
+                </div>
+              `
+            : html``;
+        })()}
       </body>
     </html>
   `;
@@ -499,8 +564,14 @@ application.partials.feed = ({ feed, feedEntries }) =>
         href="https://${application.configuration
           .hostname}/feeds/${feed.externalId}/websub"
       />
-      $${typeof feed.icon === "string"
-        ? html`<icon>${feed.icon}</icon>`
+      $${typeof feed.icon === "string" || typeof feed.emailIcon === "string"
+        ? html`<icon
+            >${feed.icon ??
+            feed.emailIcon ??
+            (() => {
+              throw new Error();
+            })()}</icon
+          >`
         : html``}
       <updated
         >${feedEntries[0]?.createdAt ?? "2000-01-01T00:00:00.000Z"}</updated
@@ -563,8 +634,8 @@ application.partials.feed = ({ feed, feedEntries }) =>
                   <small>
                     <a
                       href="https://${application.configuration
-                        .hostname}/feeds/${feed.externalId}/delete"
-                      >Delete Kill the Newsletter! feed</a
+                        .hostname}/feeds/${feed.externalId}"
+                      >Kill the Newsletter! feed settings</a
                     >
                   </small>
                 </p>
@@ -579,149 +650,154 @@ application.server?.push({
   pathname: "/",
   handler: (request, response) => {
     response.end(
-      application.layout(html`
-        <form
-          method="POST"
-          action="/"
-          novalidate
-          css="${css`
-            display: flex;
-            gap: var(--space--2);
-            @media (max-width: 400px) {
-              flex-direction: column;
-            }
-          `}"
-        >
-          <input
-            type="text"
-            name="title"
-            placeholder="Feed title…"
-            required
-            maxlength="200"
-            autofocus
+      application.layout({
+        request,
+        response,
+        head: html`<title>Kill the Newsletter!</title>`,
+        body: html`
+          <form
+            key="feeds/post"
+            method="POST"
+            action="/feeds"
+            novalidate
             css="${css`
-              flex: 1;
+              display: flex;
+              gap: var(--space--2);
+              @media (max-width: 400px) {
+                flex-direction: column;
+              }
             `}"
-          />
-          <div><button>Create Feed</button></div>
-        </form>
-        <p>
-          <small>
-            <a href="https://leafac.com">By Leandro Facchinetti</a> |
-            <a href="https://github.com/leafac/kill-the-newsletter">Source</a> |
-            <a href="mailto:kill-the-newsletter@leafac.com">Report Issue</a> |
-            <a href="https://patreon.com/leafac">Patreon</a> ·
-            <a href="https://paypal.me/LeandroFacchinettiEU">PayPal</a> ·
-            <a href="https://github.com/sponsors/leafac">GitHub Sponsors</a>
-          </small>
-        </p>
-        <hr
-          css="${css`
-            border-top: var(--border-width--1) solid
-              light-dark(var(--color--slate--200), var(--color--slate--800));
-          `}"
-        />
-        <div>
-          <h2>How does Kill the Newsletter! work?</h2>
+          >
+            <input
+              type="text"
+              name="title"
+              placeholder="Feed title…"
+              required
+              maxlength="200"
+              autofocus
+              css="${css`
+                flex: 1;
+              `}"
+            />
+            <div><button>Create feed</button></div>
+          </form>
           <p>
-            Create a feed with the form above and Kill the Newsletter! provides
-            you with an email address and an Atom feed. Emails that are received
-            at that address are turned into entries in that feed. Sign up to a
-            newsletter with that address and use your feed reader to subscribe
-            to that feed.
+            <small>
+              <a href="https://leafac.com">By Leandro Facchinetti</a> |
+              <a href="https://github.com/leafac/kill-the-newsletter">Source</a
+              > |
+              <a href="mailto:kill-the-newsletter@leafac.com">Report Issue</a> |
+              <a href="https://patreon.com/leafac">Patreon</a> ·
+              <a href="https://paypal.me/LeandroFacchinettiEU">PayPal</a> ·
+              <a href="https://github.com/sponsors/leafac">GitHub Sponsors</a>
+            </small>
           </p>
-        </div>
-        <div>
-          <h2>How do I confirm my newsletter subscription?</h2>
-          <p>
-            In most cases when you subscribe to a newsletter the newsletter
-            publisher sends you an email with a confirmation link. Kill the
-            Newsletter! converts that email into a feed entry as usual, so it
-            appears in your feed reader and you may follow the confirmation link
-            from there. Some newsletter publishers want you to reply to an email
-            using the address that subscribed to the newsletter. Unfortunately
-            Kill the Newsletter! doesn’t support this scenario, but you may
-            contact the newsletter publisher and ask them to verify you
-            manually. As a workaround, some people have had success with signing
-            up for the newsletter using their regular email address and setting
-            up a filter to forward the emails to Kill the Newsletter!
-          </p>
-        </div>
-        <div>
-          <h2>
-            Why can’t I subscribe to a newsletter with my Kill the Newsletter!
-            email?
-          </h2>
-          <p>
-            Some newsletter publishers block Kill the Newsletter!. You may
-            contact them to explain why using Kill the Newsletter! is important
-            to you and ask them to reconsider their decision, but ultimately
-            it’s their content and their choice of who has access to it and by
-            what means. As a workaround, some people have had success with
-            signing up for the newsletter using their regular email address and
-            setting up a filter to forward the emails to Kill the Newsletter!
-          </p>
-        </div>
-        <div>
-          <h2>How do I share a Kill the Newsletter! feed?</h2>
-          <p>
-            You don’t. The feed includes the identifier for the email address
-            and anyone who has access to it may unsubscribe you from your
-            newsletters, send you spam, and so forth. Instead of sharing a feed,
-            you may share Kill the Newsletter! itself and let people create
-            their own Kill the Newsletter! feeds. Kill the Newsletter! has been
-            designed this way because it plays better with newsletter
-            publishers, who may, for example, get statistics on the number of
-            subscribers who use Kill the Newsletter!. Note that Kill the
-            Newsletter! itself doesn’t track users in any way.
-          </p>
-        </div>
-        <div>
-          <h2>Why are old entries disappearing?</h2>
-          <p>
-            When Kill the Newsletter! receives an email it may delete old
-            entries to keep the feed under a size limit, because some feed
-            readers don’t support feeds that are too big.
-          </p>
-        </div>
-        <div>
-          <h2>Why isn’t my feed updating?</h2>
-          <p>
-            Send an email to the address that corresponds to your Kill the
-            Newsletter! feed and wait a few minutes. If the email shows up on
-            your feed reader, then the issue must be with the newsletter
-            publisher and you should contact them. Otherwise, please
-            <a href="mailto:kill-the-newsletter@leafac.com"
-              >report the issue us</a
-            >.
-          </p>
-        </div>
-        <div>
-          <h2>How do I delete my Kill the Newsletter! feed?</h2>
-          <p>
-            At the end of each feed entry there’s a link to delete the Kill the
-            Newsletter! feed.
-          </p>
-        </div>
-        <div>
-          <h2>
-            I’m a newsletter publisher and I saw some people subscribing with
-            Kill the Newsletter!. What is this?
-          </h2>
-          <p>
-            Think of Kill the Newsletter! as an email provider like Gmail, but
-            the emails get delivered through Atom feeds for people who prefer to
-            read with feed readers instead of email. Also, consider providing
-            your content through an Atom feed—your readers will appreciate it.
-          </p>
-        </div>
-      `),
+          <hr />
+          <div>
+            <h2>How does Kill the Newsletter! work?</h2>
+            <p>
+              Create a feed with the form above and Kill the Newsletter!
+              provides you with an email address and an Atom feed. Emails that
+              are received at that address are turned into entries in that feed.
+              Sign up to a newsletter with that address and use your feed reader
+              to subscribe to that feed.
+            </p>
+          </div>
+          <div>
+            <h2>How do I confirm my newsletter subscription?</h2>
+            <p>
+              In most cases when you subscribe to a newsletter the newsletter
+              publisher sends you an email with a confirmation link. Kill the
+              Newsletter! converts that email into a feed entry as usual, so it
+              appears in your feed reader and you may follow the confirmation
+              link from there. Some newsletter publishers want you to reply to
+              an email using the address that subscribed to the newsletter.
+              Unfortunately Kill the Newsletter! doesn’t support this scenario,
+              but you may contact the newsletter publisher and ask them to
+              verify you manually. As a workaround, some people have had success
+              with signing up for the newsletter using their regular email
+              address and setting up a filter to forward the emails to Kill the
+              Newsletter!
+            </p>
+          </div>
+          <div>
+            <h2>
+              Why can’t I subscribe to a newsletter with my Kill the Newsletter!
+              email?
+            </h2>
+            <p>
+              Some newsletter publishers block Kill the Newsletter!. You may
+              contact them to explain why using Kill the Newsletter! is
+              important to you and ask them to reconsider their decision, but
+              ultimately it’s their content and their choice of who has access
+              to it and by what means. As a workaround, some people have had
+              success with signing up for the newsletter using their regular
+              email address and setting up a filter to forward the emails to
+              Kill the Newsletter!
+            </p>
+          </div>
+          <div>
+            <h2>How do I share a Kill the Newsletter! feed?</h2>
+            <p>
+              You don’t. The feed includes the identifier for the email address
+              and anyone who has access to it may unsubscribe you from your
+              newsletters, send you spam, and so forth. Instead of sharing a
+              feed, you may share Kill the Newsletter! itself and let people
+              create their own Kill the Newsletter! feeds. Kill the Newsletter!
+              has been designed this way because it plays better with newsletter
+              publishers, who may, for example, get statistics on the number of
+              subscribers who use Kill the Newsletter!. Note that Kill the
+              Newsletter! itself doesn’t track users in any way.
+            </p>
+          </div>
+          <div>
+            <h2>Why are old entries disappearing?</h2>
+            <p>
+              When Kill the Newsletter! receives an email it may delete old
+              entries to keep the feed under a size limit, because some feed
+              readers don’t support feeds that are too big.
+            </p>
+          </div>
+          <div>
+            <h2>Why isn’t my feed updating?</h2>
+            <p>
+              Send an email to the address that corresponds to your Kill the
+              Newsletter! feed and wait a few minutes. If the email shows up on
+              your feed reader, then the issue must be with the newsletter
+              publisher and you should contact them. Otherwise, please
+              <a href="mailto:kill-the-newsletter@leafac.com"
+                >report the issue us</a
+              >.
+            </p>
+          </div>
+          <div>
+            <h2>How do I delete my Kill the Newsletter! feed?</h2>
+            <p>
+              At the end of each feed entry there’s a link to manage the Kill
+              the Newsletter! feed settings, including deleting it.
+            </p>
+          </div>
+          <div>
+            <h2>
+              I’m a newsletter publisher and I saw some people subscribing with
+              Kill the Newsletter!. What is this?
+            </h2>
+            <p>
+              Think of Kill the Newsletter! as an email provider like Gmail, but
+              the emails get delivered through Atom feeds for people who prefer
+              to read with feed readers instead of email. Also, consider
+              providing your content through an Atom feed—your readers will
+              appreciate it.
+            </p>
+          </div>
+        `,
+      }),
     );
   },
 });
 application.server?.push({
   method: "POST",
-  pathname: "/",
+  pathname: "/feeds",
   handler: (
     request: serverTypes.Request<{}, {}, {}, { title: string }, {}>,
     response,
@@ -734,7 +810,6 @@ application.server?.push({
       throw "validation";
     const feed = application.database.get<{
       externalId: string;
-      title: string;
     }>(
       sql`
         select * from "feeds" where "id" = ${
@@ -753,112 +828,17 @@ application.server?.push({
         };
       `,
     )!;
-    response.end(
-      request.headers.accept === "application/json"
-        ? JSON.stringify({
-            feedId: feed.externalId,
-            email: `${feed.externalId}@${application.configuration.hostname}`,
-            feed: `https://${
-              application.configuration.hostname
-            }/feeds/${feed.externalId}.xml`,
-          })
-        : application.layout(html`
-            <p>Feed “${feed.title}” created.</p>
-            <div>
-              <p>Subscribe to a newsletter with the following email address:</p>
-              <div
-                css="${css`
-                  display: flex;
-                  gap: var(--space--2);
-                  @media (max-width: 400px) {
-                    flex-direction: column;
-                  }
-                `}"
-              >
-                <input
-                  type="text"
-                  value="${feed.externalId}@${application.configuration
-                    .hostname}"
-                  readonly
-                  css="${css`
-                    flex: 1;
-                  `}"
-                  javascript="${javascript`
-                    this.onclick = () => {
-                      this.select();
-                    };
-                  `}"
-                />
-                <div>
-                  <button
-                    javascript="${javascript`
-                      this.onclick = async () => {
-                        await navigator.clipboard.writeText(${`${feed.externalId}@${application.configuration.hostname}`});
-                        javascript.tippy({
-                          element: this,
-                          trigger: "manual",
-                          content: "Copied",
-                        }).show();
-                        await utilities.sleep(1000);
-                        this.tooltip.hide();
-                      };
-                    `}"
-                  >
-                    <i class="bi bi-copy"></i>  Copy
-                  </button>
-                </div>
-              </div>
-            </div>
-            <div>
-              <p>Subscribe on your feed reader to the following Atom feed:</p>
-              <div
-                css="${css`
-                  display: flex;
-                  gap: var(--space--2);
-                  @media (max-width: 400px) {
-                    flex-direction: column;
-                  }
-                `}"
-              >
-                <input
-                  type="text"
-                  value="https://${application.configuration
-                    .hostname}/feeds/${feed.externalId}.xml"
-                  readonly
-                  css="${css`
-                    flex: 1;
-                  `}"
-                  javascript="${javascript`
-                    this.onclick = () => {
-                      this.select();
-                    };
-                  `}"
-                />
-                <div>
-                  <button
-                    javascript="${javascript`
-                      this.onclick = async () => {
-                        await navigator.clipboard.writeText(${`https://${
-                          application.configuration.hostname
-                        }/feeds/${feed.externalId}.xml`});
-                        javascript.tippy({
-                          element: this,
-                          trigger: "manual",
-                          content: "Copied",
-                        }).show();
-                        await utilities.sleep(1000);
-                        this.tooltip.hide();
-                      };
-                    `}"
-                  >
-                    <i class="bi bi-copy"></i>  Copy
-                  </button>
-                </div>
-              </div>
-            </div>
-            <p><a href="/">← Create Another Feed</a></p>
-          `),
-    );
+    if (request.headers.accept === "application/json")
+      response.setHeader("Content-Type", "application/json").end(
+        JSON.stringify({
+          feedId: feed.externalId,
+          email: `${feed.externalId}@${application.configuration.hostname}`,
+          feed: `https://${
+            application.configuration.hostname
+          }/feeds/${feed.externalId}.xml`,
+        }),
+      );
+    else response.redirect(`/feeds/${feed.externalId}`);
   },
 });
 application.server?.push({
@@ -881,15 +861,333 @@ application.server?.push({
       externalId: string;
       title: string;
       icon: string | null;
+      emailIcon: string | null;
     }>(
       sql`
-        select "id", "externalId", "title", "icon"
+        select "id", "externalId", "title", "icon", "emailIcon"
         from "feeds"
         where "externalId" = ${request.pathname.feedExternalId};
       `,
     );
     if (request.state.feed === undefined) return;
     response.setHeader("X-Robots-Tag", "none");
+  },
+});
+application.server?.push({
+  method: "GET",
+  pathname: new RegExp("^/feeds/(?<feedExternalId>[A-Za-z0-9]+)$"),
+  handler: (
+    request: serverTypes.Request<
+      {},
+      {},
+      {},
+      {},
+      Application["types"]["states"]["Feed"]
+    >,
+    response,
+  ) => {
+    if (request.state.feed === undefined) return;
+    response.end(
+      application.layout({
+        request,
+        response,
+        head: html`
+          <title>${request.state.feed.title} · Kill the Newsletter!</title>
+        `,
+        body: html`
+          <div>
+            <h2>${request.state.feed.title}</h2>
+            <p>Subscribe to a newsletter with the following email address:</p>
+            <div
+              css="${css`
+                display: flex;
+                gap: var(--space--2);
+                @media (max-width: 400px) {
+                  flex-direction: column;
+                }
+              `}"
+            >
+              <input
+                type="text"
+                value="${request.state.feed.externalId}@${application
+                  .configuration.hostname}"
+                readonly
+                css="${css`
+                  flex: 1;
+                `}"
+                javascript="${javascript`
+                  this.onclick = () => {
+                    this.select();
+                  };
+                `}"
+              />
+              <div>
+                <button
+                  javascript="${javascript`
+                    this.onclick = async () => {
+                      await navigator.clipboard.writeText(${`${request.state.feed.externalId}@${application.configuration.hostname}`});
+                      javascript.tippy({
+                        element: this,
+                        trigger: "manual",
+                        content: "Copied",
+                      }).show();
+                      await utilities.sleep(1000);
+                      this.tippy.hide();
+                    };
+                  `}"
+                >
+                  <i class="bi bi-copy"></i>  Copy
+                </button>
+              </div>
+            </div>
+          </div>
+          <div>
+            <p>Subscribe on your feed reader to the following Atom feed:</p>
+            <div
+              css="${css`
+                display: flex;
+                gap: var(--space--2);
+                @media (max-width: 400px) {
+                  flex-direction: column;
+                }
+              `}"
+            >
+              <input
+                type="text"
+                value="https://${application.configuration
+                  .hostname}/feeds/${request.state.feed.externalId}.xml"
+                readonly
+                css="${css`
+                  flex: 1;
+                `}"
+                javascript="${javascript`
+                  this.onclick = () => {
+                    this.select();
+                  };
+                `}"
+              />
+              <div>
+                <button
+                  javascript="${javascript`
+                    this.onclick = async () => {
+                      await navigator.clipboard.writeText(${`https://${
+                        application.configuration.hostname
+                      }/feeds/${request.state.feed.externalId}.xml`});
+                      javascript.tippy({
+                        element: this,
+                        trigger: "manual",
+                        content: "Copied",
+                      }).show();
+                      await utilities.sleep(1000);
+                      this.tippy.hide();
+                    };
+                  `}"
+                >
+                  <i class="bi bi-copy"></i>  Copy
+                </button>
+              </div>
+            </div>
+          </div>
+          <p><a href="/">← Create another feed</a></p>
+          <hr />
+          <form
+            key="feeds/patch"
+            method="PATCH"
+            action="/feeds/${request.state.feed.externalId}"
+            novalidate
+            css="${css`
+              display: flex;
+              flex-direction: column;
+              gap: var(--space--4);
+            `}"
+          >
+            <div>
+              <h2>Feed settings</h2>
+              <label>
+                <div><small>Title</small></div>
+                <input
+                  type="text"
+                  name="title"
+                  value="${request.state.feed.title}"
+                  required
+                  maxlength="200"
+                  css="${css`
+                    width: 100%;
+                  `}"
+                />
+              </label>
+            </div>
+            <label>
+              <div><small>Icon</small></div>
+              <input
+                type="text"
+                name="icon"
+                value="${request.state.feed.icon ?? ""}"
+                placeholder="https://example.com/favicon.ico"
+                maxlength="200"
+                css="${css`
+                  width: 100%;
+                `}"
+                javascript="${javascript`
+                  this.onvalidate = () => {
+                    try {
+                      new URL(this.value);
+                    }
+                    catch {
+                      throw new javascript.ValidationError("Invalid URL.");
+                    }
+                  };
+                `}"
+              />
+            </label>
+            <div><button>Update feed settings</button></div>
+          </form>
+          <hr />
+          <form
+            key="feeds/delete"
+            method="DELETE"
+            action="/feeds/${request.state.feed.externalId}"
+            novalidate
+            css="${css`
+              display: flex;
+              flex-direction: column;
+              gap: var(--space--4);
+            `}"
+          >
+            <div>
+              <h2>Delete feed</h2>
+              <p
+                css="${css`
+                  color: light-dark(
+                    var(--color--red--500),
+                    var(--color--red--500)
+                  );
+                `}"
+              >
+                <i class="bi bi-exclamation-triangle-fill"></i> This action is
+                irreversible! Your feed and all its entries will be lost!
+              </p>
+            </div>
+            <p>
+              Before you proceed, we recommend that you unsubscribe from the
+              publisher (typically you do that by following a link in a feed
+              entry) and unsubscribe from the feed on the feed reader.
+            </p>
+            <label>
+              <div><small>Feed title confirmation</small></div>
+              <input
+                type="text"
+                placeholder="${request.state.feed.title}"
+                required
+                css="${css`
+                  width: 100%;
+                `}"
+                javascript="${javascript`
+                  this.onvalidate = () => {
+                    if (this.value !== ${request.state.feed.title})
+                      throw new javascript.ValidationError(${`Incorrect feed title confirmation: “${request.state.feed.title}”`});
+                  };
+                `}"
+              />
+            </label>
+            <div><button>Delete feed</button></div>
+          </form>
+        `,
+      }),
+    );
+  },
+});
+application.server?.push({
+  method: "PATCH",
+  pathname: new RegExp("^/feeds/(?<feedExternalId>[A-Za-z0-9]+)$"),
+  handler: (
+    request: serverTypes.Request<
+      {},
+      {},
+      {},
+      { title: string; icon: string },
+      Application["types"]["states"]["Feed"]
+    >,
+    response,
+  ) => {
+    if (request.state.feed === undefined) return;
+    if (
+      typeof request.body.title !== "string" ||
+      request.body.title.trim() === "" ||
+      typeof request.body.icon !== "string" ||
+      (request.body.icon.trim() !== "" &&
+        (() => {
+          try {
+            new URL(request.body.icon);
+            return false;
+          } catch {
+            return true;
+          }
+        })())
+    )
+      throw "validation";
+    application.database.run(
+      sql`
+        update "feeds"
+        set
+          "title" = ${request.body.title},
+          "icon" = ${request.body.icon.trim() === "" ? null : request.body.icon}
+        where "id" = ${request.state.feed.id};
+      `,
+    );
+    response.setFlash(html`Feed settings updated successfully.`);
+    response.redirect();
+  },
+});
+application.server?.push({
+  method: "DELETE",
+  pathname: new RegExp("^/feeds/(?<feedExternalId>[A-Za-z0-9]+)$"),
+  handler: (
+    request: serverTypes.Request<
+      {},
+      {},
+      {},
+      {},
+      Application["types"]["states"]["Feed"]
+    >,
+    response,
+  ) => {
+    if (request.state.feed === undefined) return;
+    application.database.executeTransaction(() => {
+      application.database.run(
+        sql`
+          delete from "feedWebSubSubscriptions" where "feed" = ${request.state.feed!.id};
+        `,
+      );
+      application.database.run(
+        sql`
+          delete from "feedVisualizations" where "feed" = ${request.state.feed!.id};
+        `,
+      );
+      for (const feedEntry of application.database.all<{ id: number }>(
+        sql`
+          select "id" from "feedEntries" where "feed" = ${request.state.feed!.id};
+        `,
+      )) {
+        application.database.run(
+          sql`
+            delete from "feedEntryEnclosureLinks" where "feedEntry" = ${feedEntry.id};
+          `,
+        );
+        application.database.run(
+          sql`
+            delete from "feedEntries" where "id" = ${feedEntry.id};
+          `,
+        );
+      }
+      application.database.run(
+        sql`
+          delete from "feeds" where "id" = ${request.state.feed!.id};
+        `,
+      );
+    });
+    response.setFlash(html`Feed deleted successfully.`);
+    response.redirect("/");
   },
 });
 application.server?.push({
@@ -919,12 +1217,19 @@ application.server?.push({
     ) {
       response.statusCode = 429;
       response.end(
-        application.layout(html`
-          <p>
-            Rate limit. This feed was visualized too often. Please return in one
-            hour.
-          </p>
-        `),
+        application.layout({
+          request,
+          response,
+          head: html`<title>Rate limit · Kill the Newsletter!</title>`,
+          body: html`
+            <div>
+              <h2>Rate limit</h2>
+              <p>
+                This feed was visualized too often. Please return in one hour.
+              </p>
+            </div>
+          `,
+        }),
       );
       return;
     }
@@ -1095,233 +1400,127 @@ application.server?.push({
   },
 });
 if (application.commandLineArguments.values.type === "backgroundJob")
-  application.database.backgroundJob(
-    { type: "feedWebSubSubscriptions.verify" },
-    async (job: {
-      feedId: number;
-      "hub.mode": "subscribe" | "unsubscribe";
-      "hub.topic": string;
-      "hub.callback": string;
-      "hub.secret": string;
-    }) => {
-      const feed = application.database.get<{
-        id: number;
-      }>(
-        sql`
-          select "id"
-          from "feeds"
-          where "id" = ${job.feedId};
-        `,
-      );
-      if (feed === undefined) return;
-      const feedWebSubSubscription = application.database.get<{ id: number }>(
-        sql`
-          select "id"
-          from "feedWebSubSubscriptions"
-          where
-            "feed" = ${feed.id} and
-            "callback" = ${job["hub.callback"]};
-        `,
-      );
-      if (
-        job["hub.mode"] === "unsubscribe" &&
-        feedWebSubSubscription === undefined
-      )
-        return;
-      const verificationChallenge = cryptoRandomString({
-        length: 100,
-        characters: "abcdefghijklmnopqrstuvwxyz0123456789",
-      });
-      const verificationURL = new URL(job["hub.callback"]);
-      verificationURL.searchParams.append("hub.mode", job["hub.mode"]);
-      verificationURL.searchParams.append("hub.topic", job["hub.topic"]);
-      verificationURL.searchParams.append(
-        "hub.challenge",
-        verificationChallenge,
-      );
-      if (job["hub.mode"] === "subscribe")
+  for (
+    let backgroundJobIndex = 0;
+    backgroundJobIndex < 32;
+    backgroundJobIndex++
+  )
+    application.database.backgroundJob(
+      { type: "feedWebSubSubscriptions.verify" },
+      async (job: {
+        feedId: number;
+        "hub.mode": "subscribe" | "unsubscribe";
+        "hub.topic": string;
+        "hub.callback": string;
+        "hub.secret": string;
+      }) => {
+        const feed = application.database.get<{
+          id: number;
+        }>(
+          sql`
+            select "id"
+            from "feeds"
+            where "id" = ${job.feedId};
+          `,
+        );
+        if (feed === undefined) return;
+        const feedWebSubSubscription = application.database.get<{ id: number }>(
+          sql`
+            select "id"
+            from "feedWebSubSubscriptions"
+            where
+              "feed" = ${feed.id} and
+              "callback" = ${job["hub.callback"]};
+          `,
+        );
+        if (
+          job["hub.mode"] === "unsubscribe" &&
+          feedWebSubSubscription === undefined
+        )
+          return;
+        const verificationChallenge = cryptoRandomString({
+          length: 100,
+          characters: "abcdefghijklmnopqrstuvwxyz0123456789",
+        });
+        const verificationURL = new URL(job["hub.callback"]);
+        verificationURL.searchParams.append("hub.mode", job["hub.mode"]);
+        verificationURL.searchParams.append("hub.topic", job["hub.topic"]);
         verificationURL.searchParams.append(
-          "hub.lease_seconds",
-          String(24 * 60 * 60),
+          "hub.challenge",
+          verificationChallenge,
         );
-      const verificationResponse = await fetch(verificationURL, {
-        redirect: "manual",
-      });
-      if (
-        !verificationResponse.ok ||
-        (await verificationResponse.text()) !== verificationChallenge
-      )
-        return;
-      switch (job["hub.mode"]) {
-        case "subscribe":
-          if (feedWebSubSubscription === undefined)
-            application.database.run(
-              sql`
-                insert into "feedWebSubSubscriptions" (
-                  "feed",
-                  "createdAt",
-                  "callback",
-                  "secret"
-                )
-                values (
-                  ${feed.id},
-                  ${new Date().toISOString()},
-                  ${job["hub.callback"]},
-                  ${job["hub.secret"]}
-                );
-              `,
-            );
-          else
-            application.database.run(
-              sql`
-                update "feedWebSubSubscriptions"
-                set
-                  "createdAt" = ${new Date().toISOString()},
-                  "secret" = ${job["hub.secret"]}
-                where "id" = ${feedWebSubSubscription.id};
-              `,
-            );
-          break;
-        case "unsubscribe":
-          application.database.run(
-            sql`
-              delete from "feedWebSubSubscriptions" where "id" = ${feedWebSubSubscription!.id};
-            `,
+        if (job["hub.mode"] === "subscribe")
+          verificationURL.searchParams.append(
+            "hub.lease_seconds",
+            String(24 * 60 * 60),
           );
-          break;
-      }
-    },
-  );
-application.server?.push({
-  method: "GET",
-  pathname: new RegExp("^/feeds/(?<feedExternalId>[A-Za-z0-9]+)/delete$"),
-  handler: (
-    request: serverTypes.Request<
-      {},
-      {},
-      {},
-      {},
-      Application["types"]["states"]["Feed"]
-    >,
-    response,
-  ) => {
-    if (request.state.feed === undefined) return;
-    response.end(
-      application.layout(html`
-        <p>
-          <i class="bi bi-exclamation-triangle-fill"></i> This action is
-          irreversible! Your feed and all its entries will be lost!
-        </p>
-        <p>
-          Before you proceed, we recommend that you unsubscribe from the
-          publisher (typically you do that by following a link in a feed entry)
-          and unsubscribe from the feed on the feed reader.
-        </p>
-        <p>
-          To delete the feed, please confirm the feed title:
-          “${request.state.feed.title}”
-        </p>
-        <form
-          method="DELETE"
-          action="https://${application.configuration.hostname}/feeds/${request
-            .state.feed.externalId}"
-          novalidate
-          css="${css`
-            display: flex;
-            gap: var(--space--2);
-            @media (max-width: 400px) {
-              flex-direction: column;
-            }
-          `}"
-        >
-          <input
-            type="text"
-            placeholder="${request.state.feed.title}"
-            required
-            autofocus
-            css="${css`
-              flex: 1;
-            `}"
-            javascript="${javascript`
-              this.onvalidate = () => {
-                if (this.value !== ${request.state.feed.title})
-                  throw new javascript.ValidationError(${`Incorrect feed title: “${request.state.feed.title}”`});
-              };
-            `}"
-          />
-          <button>Delete Feed</button>
-        </form>
-      `),
+        const verificationResponse = await fetch(verificationURL, {
+          redirect: "manual",
+        });
+        if (
+          !verificationResponse.ok ||
+          (await verificationResponse.text()) !== verificationChallenge
+        )
+          return;
+        switch (job["hub.mode"]) {
+          case "subscribe":
+            if (feedWebSubSubscription === undefined)
+              application.database.run(
+                sql`
+                  insert into "feedWebSubSubscriptions" (
+                    "feed",
+                    "createdAt",
+                    "callback",
+                    "secret"
+                  )
+                  values (
+                    ${feed.id},
+                    ${new Date().toISOString()},
+                    ${job["hub.callback"]},
+                    ${job["hub.secret"]}
+                  );
+                `,
+              );
+            else
+              application.database.run(
+                sql`
+                  update "feedWebSubSubscriptions"
+                  set
+                    "createdAt" = ${new Date().toISOString()},
+                    "secret" = ${job["hub.secret"]}
+                  where "id" = ${feedWebSubSubscription.id};
+                `,
+              );
+            break;
+          case "unsubscribe":
+            application.database.run(
+              sql`
+                delete from "feedWebSubSubscriptions" where "id" = ${feedWebSubSubscription!.id};
+              `,
+            );
+            break;
+        }
+      },
     );
-  },
-});
-application.server?.push({
-  method: "DELETE",
-  pathname: new RegExp("^/feeds/(?<feedExternalId>[A-Za-z0-9]+)$"),
-  handler: (
-    request: serverTypes.Request<
-      {},
-      {},
-      {},
-      {},
-      Application["types"]["states"]["Feed"]
-    >,
-    response,
-  ) => {
-    if (request.state.feed === undefined) return;
-    application.database.executeTransaction(() => {
-      application.database.run(
-        sql`
-          delete from "feedWebSubSubscriptions" where "feed" = ${request.state.feed!.id};
-        `,
-      );
-      application.database.run(
-        sql`
-          delete from "feedVisualizations" where "feed" = ${request.state.feed!.id};
-        `,
-      );
-      for (const feedEntry of application.database.all<{ id: number }>(
-        sql`
-          select "id" from "feedEntries" where "feed" = ${request.state.feed!.id};
-        `,
-      )) {
-        application.database.run(
-          sql`
-            delete from "feedEntryEnclosureLinks" where "feedEntry" = ${feedEntry.id};
-          `,
-        );
-        application.database.run(
-          sql`
-            delete from "feedEntries" where "id" = ${feedEntry.id};
-          `,
-        );
-      }
-      application.database.run(
-        sql`
-          delete from "feeds" where "id" = ${request.state.feed!.id};
-        `,
-      );
-    });
-    response.end(
-      application.layout(html`
-        <p>Feed deleted successfully.</p>
-        <p><a href="/">← Create a New Feed</a></p>
-      `),
-    );
-  },
-});
 application.server?.push({
   handler: (request, response) => {
     response.statusCode = 404;
     response.end(
-      application.layout(html`
-        <p>Not found.</p>
-        <p>
-          If you expected to see the web version of a newsletter entry, you may
-          be interested in the answer to the question
-          <a href="/">“Why are old entries disappearing?”</a>.
-        </p>
-      `),
+      application.layout({
+        request,
+        response,
+        head: html`<title>Not found · Kill the Newsletter!</title>`,
+        body: html`
+          <div>
+            <h2>Not found</h2>
+            <p>
+              If you expected to see the web version of a newsletter entry, you
+              may be interested in the answer to the question
+              <a href="/">“Why are old entries disappearing?”</a>.
+            </p>
+          </div>
+        `,
+      }),
     );
   },
 });
@@ -1329,15 +1528,22 @@ application.server?.push({
   error: true,
   handler: (request, response) => {
     response.end(
-      application.layout(html`
-        <p>Something went wrong.</p>
-        <p>
-          Please report this issue to
-          <a href="mailto:kill-the-newsletter@leafac.com"
-            >kill-the-newsletter@leafac.com</a
-          >.
-        </p>
-      `),
+      application.layout({
+        request,
+        response,
+        head: html`<title>Server error · Kill the Newsletter!</title>`,
+        body: html`
+          <div>
+            <h2>Server error.</h2>
+            <p>
+              Please report this issue to
+              <a href="mailto:kill-the-newsletter@leafac.com"
+                >kill-the-newsletter@leafac.com</a
+              >.
+            </p>
+          </div>
+        `,
+      }),
     );
   },
 });
@@ -1441,7 +1647,7 @@ if (application.commandLineArguments.values.type === "email") {
             application.database.run(
               sql`
                 update "feeds"
-                set "icon" = ${`https://${(session.envelope.mailFrom as SMTPServerAddress).address.split("@")[1]}/favicon.ico`}
+                set "emailIcon" = ${`https://${(session.envelope.mailFrom as SMTPServerAddress).address.split("@")[1]}/favicon.ico`}
                 where "id" = ${feed.id};
               `,
             );
@@ -1598,89 +1804,91 @@ if (application.commandLineArguments.values.type === "email") {
       .unref();
 }
 if (application.commandLineArguments.values.type === "backgroundJob")
-  application.database.backgroundJob(
-    { type: "feedWebSubSubscriptions.dispatch" },
-    async (job: {
-      feedId: number;
-      feedEntryId: number;
-      feedWebSubSubscriptionId: number;
-    }) => {
-      const feed = application.database.get<{
-        externalId: string;
-        title: string;
-        icon: string | null;
-      }>(
-        sql`
-          select "externalId", "title", "icon"
-          from "feeds"
-          where "id" = ${job.feedId};
-        `,
-      );
-      if (feed === undefined) return;
-      const feedEntry = application.database.get<{
-        id: number;
-        externalId: string;
-        createdAt: string;
-        author: string | null;
-        title: string;
-        content: string;
-      }>(
-        sql`
-          select "id", "externalId", "createdAt", "author", "title", "content"
-          from "feedEntries"
-          where "id" = ${job.feedEntryId};
-        `,
-      );
-      if (feedEntry === undefined) return;
-      const feedWebSubSubscription = application.database.get<{
-        id: number;
-        callback: string;
-        secret: string | null;
-      }>(
-        sql`
-          select "id", "callback", "secret"
-          from "feedWebSubSubscriptions"
-          where "id" = ${job.feedWebSubSubscriptionId};
-        `,
-      );
-      if (feedWebSubSubscription === undefined) return;
-      const body = application.partials.feed({
-        feed,
-        feedEntries: [feedEntry],
-      });
-      const response = await fetch(feedWebSubSubscription.callback, {
-        redirect: "manual",
-        method: "POST",
-        headers: {
-          "Content-Type": "application/atom+xml; charset=utf-8",
-          Link: `<https://${
-            application.configuration.hostname
-          }/feeds/${feed.externalId}.xml>; rel="self", <https://${
-            application.configuration.hostname
-          }/feeds/${feed.externalId}/websub>; rel="hub"`,
-          ...(typeof feedWebSubSubscription.secret === "string"
-            ? {
-                "X-Hub-Signature": `sha256=${crypto.createHmac("sha256", feedWebSubSubscription.secret).update(body).digest("hex")}`,
-              }
-            : {}),
-        },
-        body,
-      });
-      if (response.status === 410)
-        application.database.run(
+  for (let backgroundJobIndex = 0; backgroundJobIndex < 8; backgroundJobIndex++)
+    application.database.backgroundJob(
+      { type: "feedWebSubSubscriptions.dispatch" },
+      async (job: {
+        feedId: number;
+        feedEntryId: number;
+        feedWebSubSubscriptionId: number;
+      }) => {
+        const feed = application.database.get<{
+          externalId: string;
+          title: string;
+          icon: string | null;
+          emailIcon: string | null;
+        }>(
           sql`
-            delete from "feedWebSubSubscriptions" where "id" = ${feedWebSubSubscription.id};
+            select "externalId", "title", "icon", "emailIcon"
+            from "feeds"
+            where "id" = ${job.feedId};
           `,
         );
-      else if (String(response.status).startsWith("4"))
-        utilities.log(
-          "feedWebSubSubscriptions.dispatch",
-          "REQUEST ERROR",
-          String(response),
+        if (feed === undefined) return;
+        const feedEntry = application.database.get<{
+          id: number;
+          externalId: string;
+          createdAt: string;
+          author: string | null;
+          title: string;
+          content: string;
+        }>(
+          sql`
+            select "id", "externalId", "createdAt", "author", "title", "content"
+            from "feedEntries"
+            where "id" = ${job.feedEntryId};
+          `,
         );
-      else if (!response.ok) throw new Error(`Response: ${String(response)}`);
-    },
-  );
+        if (feedEntry === undefined) return;
+        const feedWebSubSubscription = application.database.get<{
+          id: number;
+          callback: string;
+          secret: string | null;
+        }>(
+          sql`
+            select "id", "callback", "secret"
+            from "feedWebSubSubscriptions"
+            where "id" = ${job.feedWebSubSubscriptionId};
+          `,
+        );
+        if (feedWebSubSubscription === undefined) return;
+        const body = application.partials.feed({
+          feed,
+          feedEntries: [feedEntry],
+        });
+        const response = await fetch(feedWebSubSubscription.callback, {
+          redirect: "manual",
+          method: "POST",
+          headers: {
+            "Content-Type": "application/atom+xml; charset=utf-8",
+            Link: `<https://${
+              application.configuration.hostname
+            }/feeds/${feed.externalId}.xml>; rel="self", <https://${
+              application.configuration.hostname
+            }/feeds/${feed.externalId}/websub>; rel="hub"`,
+            ...(typeof feedWebSubSubscription.secret === "string"
+              ? {
+                  "X-Hub-Signature": `sha256=${crypto.createHmac("sha256", feedWebSubSubscription.secret).update(body).digest("hex")}`,
+                }
+              : {}),
+          },
+          body,
+        });
+        if (response.status === 410)
+          application.database.run(
+            sql`
+              delete from "feedWebSubSubscriptions" where "id" = ${feedWebSubSubscription.id};
+            `,
+          );
+        else if (String(response.status).startsWith("4"))
+          utilities.log(
+            "feedWebSubSubscriptions.dispatch",
+            "REQUEST ERROR",
+            String(response),
+          );
+        else if (!response.ok) throw new Error(`Response: ${String(response)}`);
+      },
+    );
 
 if (application.commandLineArguments.values.type === undefined) {
   for (const port of application.configuration.ports) {
