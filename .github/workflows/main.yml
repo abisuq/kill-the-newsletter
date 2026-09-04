@@ -48,9 +48,9 @@ jobs:
             cd /mnt/kill-the-newsletter/kill-the-newsletter--deploy/
             tar -xzf ./kill-the-newsletter--ubuntu--${{ github.ref_name }}.tar.gz
             cp /mnt/kill-the-newsletter/kill-the-newsletter--deploy/kill-the-newsletter/_/configuration/kill-the-newsletter.com.mjs /mnt/kill-the-newsletter/kill-the-newsletter/configuration.mjs
+            systemctl stop kill-the-newsletter || true
             cp /mnt/kill-the-newsletter/kill-the-newsletter--deploy/kill-the-newsletter/_/configuration/kill-the-newsletter.service /etc/systemd/system/kill-the-newsletter.service
             systemctl daemon-reload
-            systemctl stop kill-the-newsletter
             mv /mnt/kill-the-newsletter/kill-the-newsletter/kill-the-newsletter/ /mnt/kill-the-newsletter/kill-the-newsletter--deploy/kill-the-newsletter--old/ || true
             mv /mnt/kill-the-newsletter/kill-the-newsletter--deploy/kill-the-newsletter/ /mnt/kill-the-newsletter/kill-the-newsletter/kill-the-newsletter/
             systemctl start kill-the-newsletter
