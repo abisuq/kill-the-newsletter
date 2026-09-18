@@ -39,7 +39,7 @@ jobs:
             kill-the-newsletter.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFV1haTYqLlxgtSrNPYC2BSkubvUL2l3pOfVK7BCA7L3
             # kill-the-newsletter.com:22 SSH-2.0-OpenSSH_10.2p1 Ubuntu-2ubuntu3.5
           EOF
-          rsync -a ./kill-the-newsletter--ubuntu--${{ github.ref_name }}.tar.gz root@kill-the-newsletter.com:/mnt/kill-the-newsletter/kill-the-newsletter--ubuntu--${{ github.ref_name }}.tar.gz
+          rsync -az ./kill-the-newsletter--ubuntu--${{ github.ref_name }}.tar.gz root@kill-the-newsletter.com:/mnt/kill-the-newsletter/kill-the-newsletter--ubuntu--${{ github.ref_name }}.tar.gz
           ssh root@kill-the-newsletter.com << "EOF"
             mkdir -p /mnt/kill-the-newsletter/kill-the-newsletter/
             rm -rf /mnt/kill-the-newsletter/kill-the-newsletter--deploy/
